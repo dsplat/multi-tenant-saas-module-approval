@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MultiTenantSaas\Modules\Approval\Events;
 
 use Carbon\CarbonImmutable;
+use Illuminate\Contracts\Events\ShouldDispatchAfterCommit;
 use MultiTenantSaas\Modules\Approval\Models\ApprovalInstance;
 
 /**
@@ -13,7 +14,7 @@ use MultiTenantSaas\Modules\Approval\Models\ApprovalInstance;
  * 载荷只含定位与结果信息：租户、实例、定义 key/version、主体类型/ID、项目、结果、时间。
  * 不包含审批意见正文（宿主需要时按权限查询）。
  */
-abstract class ApprovalEvent
+abstract class ApprovalEvent implements ShouldDispatchAfterCommit
 {
     public function __construct(
         public readonly int $tenantId,
