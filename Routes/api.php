@@ -84,11 +84,13 @@ Route::prefix(config('approval.route_prefix', ''))->middleware('operator.identif
 | 空间，withdraw 不会同 method/URI 重复注册。
 |
 | 授权：user.identify 装载 User 执行身份后走统一能力门（common.approval.self_*，
-| 准入 member + 认证等级）；**不挂 rbac.permission** —— RBAC 只作用于 Operator，
-| User 不拥有角色（identity-model 铁律）。逐记录可见性（仅本人发起人）在控制器
-| 裁决；内部快照/决策意见独立授权不出 C 端（S0 §6.3 白名单见
-| Http/Resources/UserApprovalResource）。无通用建单入口：User 发起由具体领域经
-| ApprovalService::initiateAs 验证主体操作权后创建（通用建单权限不开）。
+| self_read 准入 public + 认证等级——门只验身份，撤销参与人保留窗内仍可到控制器
+| 取元数据（C2O 缺口③）；写能力 self_withdraw 准入 member）；**不挂
+| rbac.permission** —— RBAC 只作用于 Operator，User 不拥有角色（identity-model
+| 铁律）。逐记录可见性（本人发起人/撤销保留窗元数据）在控制器裁决；内部快照/
+| 决策意见独立授权不出 C 端（S0 §6.3 白名单见 Http/Resources/UserApprovalResource）。
+| 无通用建单入口：User 发起由具体领域经 ApprovalService::initiateAs 验证主体
+| 操作权后创建（通用建单权限不开）。
 */
 Route::prefix('user/approval/instances')->middleware('user.identify')->group(function () {
     // 静态 mine 必须排在 {instanceId} 动态路由之前：注册顺序即路由缓存序列化顺序；

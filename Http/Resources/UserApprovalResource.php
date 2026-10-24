@@ -7,7 +7,9 @@ namespace MultiTenantSaas\Modules\Approval\Http\Resources;
 use DateTimeImmutable;
 use DateTimeInterface;
 use DateTimeZone;
+use MultiTenantSaas\Modules\Approval\Adapters\ApprovalMatterAdapter;
 use MultiTenantSaas\Modules\Approval\Models\ApprovalInstance;
+use MultiTenantSaas\Modules\Auth\Services\HistoryAccessPolicy;
 
 /**
  * C 端（本人发起人）审批白名单 Resource
@@ -68,6 +70,33 @@ final class UserApprovalResource
     public function detail(ApprovalInstance $instance): array
     {
         return $this->project($instance, self::DETAIL_FIELDS);
+    }
+
+    /**
+     * 保留窗元数据视图（C2O 缺口③，S0 §6.4）：被撤销参与人保留期内只见元数据。
+     *
+     * 字段按 HistoryAccessPolicy::METADATA_FIELDS 正向枚举——definition_key /
+     * outcome / 进度与起止时间 / 决策意见 / 快照构造上不可达；status_display 取
+     * ApprovalMatterAdapter 展示映射（与 matters 投影同源）。
+     *
+     * @return array<string, mixed>
+     */
+    public function metadataItem(ApprovalInstance $instance, ?string $matterId): array
+    {
+        $visible = [
+            'matter_id' => $matterId,
+            'matter_type' => ApprovalMatterAdapter::MATTER_TYPE,
+            'title' => $this->title(
+                (array) ($instance->subject_snapshot ?? []),
+                (array) ($instance->definition_snapshot ?? []),
+                $instance,
+            ),
+            'status_display' => ApprovalMatterAdapter::STATUS_DISPLAY[(string) $instance->status] ?? (string) $instance->status,
+            'created_at' => $this->timestamp($instance->created_at),
+            'updated_at' => $this->timestamp($instance->updated_at),
+        ];
+
+        return array_intersect_key($visible, array_flip(HistoryAccessPolicy::METADATA_FIELDS));
     }
 
     /**
