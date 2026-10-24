@@ -31,6 +31,14 @@ final class ApprovalSubjectRegistry
         return isset($this->contracts[$subjectType]);
     }
 
+    /**
+     * 取回契约实现（User 发起需要主体契约级的操作权证明，仅 resolve 结果不够）。
+     */
+    public function contract(string $subjectType): ?ApprovalSubjectContract
+    {
+        return $this->contracts[$subjectType] ?? null;
+    }
+
     public function resolve(string $subjectType, int $tenantId, string $subjectId): ?ApprovalSubjectResult
     {
         $contract = $this->contracts[$subjectType] ?? null;

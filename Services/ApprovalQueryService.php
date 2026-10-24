@@ -73,6 +73,29 @@ class ApprovalQueryService
     }
 
     /**
+     * 本人发起列表（C2O v0.4 §4.1）：按 (initiated_by_type, initiated_by) 双键定位，
+     * 同数值 ID 不跨身份空间成立；排序 created_at + instance_id 双键（次级键纪律）。
+     *
+     * @param  array<string, mixed>  $filters
+     */
+    public function paginateInitiatedBy(
+        int $tenantId,
+        string $initiatorType,
+        int $initiatorId,
+        array $filters = [],
+        ?int $perPage = null,
+    ): LengthAwarePaginator {
+        $this->assertTenant($tenantId);
+
+        return $this->baseQuery($tenantId, $filters)
+            ->where('approval_instances.initiated_by_type', $initiatorType)
+            ->where('approval_instances.initiated_by', $initiatorId)
+            ->orderByDesc('approval_instances.created_at')
+            ->orderByDesc('approval_instances.instance_id')
+            ->paginate($this->perPage($perPage));
+    }
+
+    /**
      * 时间线：创建、步骤激活/阻塞、每次决策、实例终态，按时间排序。
      *
      * @return array<int, array<string, mixed>>

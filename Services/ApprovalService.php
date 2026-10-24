@@ -8,8 +8,10 @@ use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use MultiTenantSaas\Context\ExecutionIdentity;
 use MultiTenantSaas\Contracts\ExecutionIdentityContract;
 use MultiTenantSaas\Modules\Approval\Contracts\ApprovalServiceContract;
+use MultiTenantSaas\Modules\Approval\Contracts\ApprovalUserSubjectContract;
 use MultiTenantSaas\Modules\Approval\Events\ApprovalEvent;
 use MultiTenantSaas\Modules\Approval\Events\ApprovalExempted;
 use MultiTenantSaas\Modules\Approval\Events\ApprovalInstanceApproved;
@@ -52,12 +54,33 @@ class ApprovalService implements ApprovalServiceContract
 
     public function initiate(int $tenantId, int $operatorId, array $data): ApprovalInstance
     {
+        // Operator 兼容入口（C2O v0.4 §4.1）：存量 initiated_by 无类型列按 operator
+        // 语义解释，本入口行为保持不动。
+        return $this->initiateAs(new ExecutionIdentity(
+            type: ExecutionIdentity::TYPE_OPERATOR,
+            surface: ExecutionIdentity::SURFACE_CONSOLE,
+            subjectId: (string) $operatorId,
+            tenantId: (string) $tenantId,
+            level: ExecutionIdentity::LEVEL_AUTHENTICATED,
+            authSource: 'compat',
+        ), $data);
+    }
+
+    /**
+     * actor-aware 发起（C2O v0.4 §4.1）：actor 由可信执行上下文提供，请求体自报
+     * 身份（initiated_by / initiated_by_type）一律忽略；User 发起必须由主体契约
+     * （ApprovalUserSubjectContract）证明主体操作权，通用建单权限不开。
+     */
+    public function initiateAs(ExecutionIdentity $actor, array $data): ApprovalInstance
+    {
+        [$tenantId, $initiatorType, $initiatorId] = $this->actorContext($actor);
+
         $this->assertTenant($tenantId);
 
         $idempotencyKey = $this->idempotencyKey($data);
 
         if ($idempotencyKey !== null) {
-            $existing = $this->findByIdempotencyKey($tenantId, $idempotencyKey);
+            $existing = $this->findIdempotentInstance($tenantId, $idempotencyKey, $initiatorType, $initiatorId);
 
             if ($existing !== null) {
                 return $existing;
@@ -73,7 +96,7 @@ class ApprovalService implements ApprovalServiceContract
 
         $subjectType = $this->resolveSubjectType($data, $definition);
         $subjectId = $this->requiredSubjectId($data);
-        $subjectSnapshot = $this->subjectSnapshot($tenantId, $subjectType, $subjectId, $data);
+        $subjectSnapshot = $this->subjectSnapshot($tenantId, $subjectType, $subjectId, $data, $actor);
         $projectId = $this->resolveProjectId($subjectSnapshot, $data);
         $steps = $this->definitionSteps($definition);
         $definitionSnapshot = $this->definitionSnapshot($definition);
@@ -85,7 +108,8 @@ class ApprovalService implements ApprovalServiceContract
         try {
             $instance = DB::transaction(function () use (
                 $tenantId,
-                $operatorId,
+                $initiatorType,
+                $initiatorId,
                 $definition,
                 $subjectType,
                 $subjectId,
@@ -121,7 +145,8 @@ class ApprovalService implements ApprovalServiceContract
                     'status' => ApprovalInstance::STATUS_PENDING,
                     'current_step_no' => 1,
                     'is_exempt' => false,
-                    'initiated_by' => $operatorId,
+                    'initiated_by' => $initiatorId,
+                    'initiated_by_type' => $initiatorType,
                     'idempotency_key' => $idempotencyKey,
                     'previous_instance_id' => $previousInstanceId,
                     'active_unique_key' => $activeUniqueKey,
@@ -154,7 +179,7 @@ class ApprovalService implements ApprovalServiceContract
             }
 
             if ($idempotencyKey !== null) {
-                $existing = $this->findByIdempotencyKey($tenantId, $idempotencyKey);
+                $existing = $this->findIdempotentInstance($tenantId, $idempotencyKey, $initiatorType, $initiatorId);
 
                 if ($existing !== null) {
                     return $existing;
@@ -176,7 +201,7 @@ class ApprovalService implements ApprovalServiceContract
         $idempotencyKey = $this->idempotencyKey($data);
 
         if ($idempotencyKey !== null) {
-            $existing = $this->findByIdempotencyKey($tenantId, $idempotencyKey);
+            $existing = $this->findIdempotentInstance($tenantId, $idempotencyKey, ExecutionIdentity::TYPE_OPERATOR, $operatorId);
 
             if ($existing !== null) {
                 return $existing;
@@ -241,6 +266,7 @@ class ApprovalService implements ApprovalServiceContract
                     'is_exempt' => true,
                     'exemption_reason' => $reason,
                     'initiated_by' => $operatorId,
+                    'initiated_by_type' => ExecutionIdentity::TYPE_OPERATOR,
                     'idempotency_key' => $idempotencyKey,
                     'previous_instance_id' => $previousInstanceId,
                     'active_unique_key' => null,
@@ -273,7 +299,7 @@ class ApprovalService implements ApprovalServiceContract
             }
 
             if ($idempotencyKey !== null) {
-                $existing = $this->findByIdempotencyKey($tenantId, $idempotencyKey);
+                $existing = $this->findIdempotentInstance($tenantId, $idempotencyKey, ExecutionIdentity::TYPE_OPERATOR, $operatorId);
 
                 if ($existing !== null) {
                     return $existing;
@@ -430,62 +456,27 @@ class ApprovalService implements ApprovalServiceContract
 
     public function withdraw(int $tenantId, int $operatorId, int|string $instanceId): ApprovalInstance
     {
-        $this->assertTenant($tenantId);
+        // Operator 兼容入口（C2O v0.4 §4.1）：存量 initiated_by 无类型列按 operator
+        // 语义解释，行为保持「仅发起人本人可撤回」。
+        return $this->performWithdraw($tenantId, ExecutionIdentity::TYPE_OPERATOR, $operatorId, $instanceId);
+    }
 
-        $events = [];
+    /**
+     * actor-aware 撤回：发起人判定为 (initiated_by_type, initiated_by) 双匹配，
+     * 同数值 ID 不跨身份空间成立；请求体自报身份不参与判定。
+     */
+    public function withdrawAs(ExecutionIdentity $actor, int|string $instanceId): ApprovalInstance
+    {
+        [$tenantId, $initiatorType, $initiatorId] = $this->actorContext($actor);
 
-        $instance = DB::transaction(function () use ($tenantId, $operatorId, $instanceId, &$events): ApprovalInstance {
-            $instance = $this->lockInstance($tenantId, $instanceId);
+        return $this->performWithdraw($tenantId, $initiatorType, $initiatorId, $instanceId);
+    }
 
-            if (! $instance->isActive()) {
-                throw new ConflictHttpException('审批实例已进入终态，不可撤回');
-            }
+    public function mine(ExecutionIdentity $actor, array $filters = [], ?int $perPage = null): LengthAwarePaginator
+    {
+        [$tenantId, $initiatorType, $initiatorId] = $this->actorContext($actor);
 
-            if ((int) $instance->initiated_by !== $operatorId) {
-                throw new AccessDeniedHttpException('只有发起人本人可以撤回');
-            }
-
-            $settings = (array) (($instance->definition_snapshot ?? [])['settings'] ?? []);
-            if (array_key_exists('allow_withdraw', $settings) && $settings['allow_withdraw'] === false) {
-                throw new ConflictHttpException('该审批定义不允许撤回');
-            }
-
-            $step = $instance->current_step_no === null ? null : ApprovalStep::query()
-                ->where('tenant_id', $tenantId)
-                ->where('instance_id', $instance->instance_id)
-                ->where('step_no', $instance->current_step_no)
-                ->lockForUpdate()
-                ->first();
-
-            if ($step !== null && $step->status === ApprovalStep::STATUS_ACTIVE) {
-                $hasApproved = ApprovalDecision::query()
-                    ->where('tenant_id', $tenantId)
-                    ->where('step_id', $step->step_id)
-                    ->where('decision', ApprovalDecision::DECISION_APPROVE)
-                    ->exists();
-
-                if ($hasApproved) {
-                    throw new ConflictHttpException('当前步骤已有通过决策，不可撤回');
-                }
-            }
-
-            $this->skipOpenSteps($instance, $step?->step_no);
-
-            $instance->status = ApprovalInstance::STATUS_WITHDRAWN;
-            $instance->outcome = ApprovalInstance::OUTCOME_WITHDRAWN;
-            $instance->current_step_no = null;
-            $instance->active_unique_key = null;
-            $instance->completed_at = now();
-            $instance->save();
-
-            $events[] = ApprovalInstanceWithdrawn::fromInstance($instance);
-
-            return $instance->refresh();
-        });
-
-        $this->dispatchEvents($events);
-
-        return $instance;
+        return $this->queries->paginateInitiatedBy($tenantId, $initiatorType, $initiatorId, $filters, $perPage);
     }
 
     public function cancel(int $tenantId, int $operatorId, int|string $instanceId, string $reason): ApprovalInstance
@@ -793,6 +784,70 @@ class ApprovalService implements ApprovalServiceContract
         return $existing;
     }
 
+    /**
+     * 撤回核心：发起人 (类型, ID) 双匹配 + 状态机迁移（兼容入口与 actor-aware 共用）。
+     */
+    private function performWithdraw(int $tenantId, string $initiatorType, int $initiatorId, int|string $instanceId): ApprovalInstance
+    {
+        $this->assertTenant($tenantId);
+
+        $events = [];
+
+        $instance = DB::transaction(function () use ($tenantId, $initiatorType, $initiatorId, $instanceId, &$events): ApprovalInstance {
+            $instance = $this->lockInstance($tenantId, $instanceId);
+
+            if (! $instance->isActive()) {
+                throw new ConflictHttpException('审批实例已进入终态，不可撤回');
+            }
+
+            if ($instance->initiatedByType() !== $initiatorType
+                || (string) $instance->initiated_by !== (string) $initiatorId) {
+                throw new AccessDeniedHttpException('只有发起人本人可以撤回');
+            }
+
+            $settings = (array) (($instance->definition_snapshot ?? [])['settings'] ?? []);
+            if (array_key_exists('allow_withdraw', $settings) && $settings['allow_withdraw'] === false) {
+                throw new ConflictHttpException('该审批定义不允许撤回');
+            }
+
+            $step = $instance->current_step_no === null ? null : ApprovalStep::query()
+                ->where('tenant_id', $tenantId)
+                ->where('instance_id', $instance->instance_id)
+                ->where('step_no', $instance->current_step_no)
+                ->lockForUpdate()
+                ->first();
+
+            if ($step !== null && $step->status === ApprovalStep::STATUS_ACTIVE) {
+                $hasApproved = ApprovalDecision::query()
+                    ->where('tenant_id', $tenantId)
+                    ->where('step_id', $step->step_id)
+                    ->where('decision', ApprovalDecision::DECISION_APPROVE)
+                    ->exists();
+
+                if ($hasApproved) {
+                    throw new ConflictHttpException('当前步骤已有通过决策，不可撤回');
+                }
+            }
+
+            $this->skipOpenSteps($instance, $step?->step_no);
+
+            $instance->status = ApprovalInstance::STATUS_WITHDRAWN;
+            $instance->outcome = ApprovalInstance::OUTCOME_WITHDRAWN;
+            $instance->current_step_no = null;
+            $instance->active_unique_key = null;
+            $instance->completed_at = now();
+            $instance->save();
+
+            $events[] = ApprovalInstanceWithdrawn::fromInstance($instance);
+
+            return $instance->refresh();
+        });
+
+        $this->dispatchEvents($events);
+
+        return $instance;
+    }
+
     private function lockInstance(int $tenantId, int|string $instanceId): ApprovalInstance
     {
         $instance = ApprovalInstance::query()
@@ -870,7 +925,7 @@ class ApprovalService implements ApprovalServiceContract
      * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
-    private function subjectSnapshot(int $tenantId, string $subjectType, string $subjectId, array $data): array
+    private function subjectSnapshot(int $tenantId, string $subjectType, string $subjectId, array $data, ?ExecutionIdentity $actor = null): array
     {
         if (! $this->subjects->has($subjectType)) {
             throw new UnprocessableEntityHttpException("未注册审批主体契约：{$subjectType}");
@@ -888,7 +943,28 @@ class ApprovalService implements ApprovalServiceContract
             throw new UnprocessableEntityHttpException('审批主体与租户/类型/ID 不一致');
         }
 
+        $this->assertActorMayInitiate($actor, $tenantId, $subjectType, $subjectId);
+
         return $subject->toSnapshot();
+    }
+
+    /**
+     * 主体操作权证明（C2O v0.4 §4.1）：User 发起必须由具体领域（主体契约）裁决，
+     * 未实现 ApprovalUserSubjectContract 的主体类型一律拒绝 User 发起——通用建单
+     * 权限不开；Operator 兼容入口保持既有 resolve() 裁决语义。
+     */
+    private function assertActorMayInitiate(?ExecutionIdentity $actor, int $tenantId, string $subjectType, string $subjectId): void
+    {
+        if ($actor === null || $actor->type !== ExecutionIdentity::TYPE_USER) {
+            return;
+        }
+
+        $contract = $this->subjects->contract($subjectType);
+
+        if (! $contract instanceof ApprovalUserSubjectContract
+            || ! $contract->userCanOperate($tenantId, $subjectId, (int) $actor->subjectId)) {
+            throw new AccessDeniedHttpException('当前 User 不允许对该主体发起审批');
+        }
     }
 
     /**
@@ -988,17 +1064,66 @@ class ApprovalService implements ApprovalServiceContract
         return $key;
     }
 
-    private function findByIdempotencyKey(int $tenantId, string $key): ?ApprovalInstance
-    {
-        return ApprovalInstance::query()
+    /**
+     * 幂等回放按发起人收紧（C2O v0.4 §4.4）：operation key 不因新增 actor 放宽——
+     * 同一 key 只回放给同一 (类型, ID) 发起人；换人复用 key 视为占用冲突，
+     * 既不跨身份空间泄漏实例，也不放任重复建单。
+     */
+    private function findIdempotentInstance(
+        int $tenantId,
+        string $key,
+        string $initiatorType,
+        int $initiatorId,
+    ): ?ApprovalInstance {
+        $existing = ApprovalInstance::query()
             ->where('tenant_id', $tenantId)
             ->where('idempotency_key', $key)
             ->first();
+
+        if ($existing === null) {
+            return null;
+        }
+
+        if ($existing->initiatedByType() !== $initiatorType
+            || (string) $existing->initiated_by !== (string) $initiatorId) {
+            throw new ConflictHttpException('idempotency_key 已被占用');
+        }
+
+        return $existing;
     }
 
     private function assertTenant(int $tenantId): void
     {
         $this->identity->assertTenant((string) $tenantId);
+    }
+
+    /**
+     * 可信 actor 上下文 → [tenantId, 发起人类型, 发起人 ID]。
+     *
+     * actor 只能来自可信执行上下文（认证身份 / 受信服务上下文），请求体自报身份
+     * 不进入本方法；租户或发起人缺失立即拒绝（tenant-isolation 铁律）。
+     * service 受信上下文不是「一种人」（C2O §3），不作为审批发起人——受信流程应
+     * 以被代理的 Operator / User 身份发起并接受主体操作权证明。
+     *
+     * @return array{0: int, 1: string, 2: int}
+     */
+    private function actorContext(ExecutionIdentity $actor): array
+    {
+        if (! in_array($actor->type, ApprovalInstance::INITIATOR_TYPES, true)) {
+            throw new AccessDeniedHttpException('受信服务上下文不是审批发起人身份');
+        }
+
+        $tenantId = $actor->tenantId;
+        if ($tenantId === null || $tenantId === '' || ! ctype_digit((string) $tenantId) || (int) $tenantId <= 0) {
+            throw new AccessDeniedHttpException('缺少租户上下文');
+        }
+
+        $subjectId = $actor->subjectId;
+        if ($subjectId === null || $subjectId === '' || ! ctype_digit((string) $subjectId)) {
+            throw new AccessDeniedHttpException('缺少发起人身份');
+        }
+
+        return [(int) $tenantId, $actor->type, (int) $subjectId];
     }
 
     /**

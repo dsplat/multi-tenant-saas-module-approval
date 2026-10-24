@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use MultiTenantSaas\Concerns\BelongsToTenant;
 use MultiTenantSaas\Concerns\HasGlobalId;
 use MultiTenantSaas\Concerns\SerializesFriendlyDates;
+use MultiTenantSaas\Context\ExecutionIdentity;
 
 /**
  * 审批实例（审批账本）
@@ -63,6 +64,18 @@ class ApprovalInstance extends Model
 
     public const OUTCOME_EXEMPT = 'exempt';
 
+    /**
+     * 发起人类型（C2O v0.4 §4.1）：与 ExecutionIdentity 身份空间对齐。
+     * service 是受信服务上下文、不是「一种人」（C2O §3），不作发起人类型。
+     */
+    public const INITIATOR_TYPES = [
+        ExecutionIdentity::TYPE_USER,
+        ExecutionIdentity::TYPE_OPERATOR,
+    ];
+
+    /** 存量行安全默认（C2O v0.4 §4.1）：无显式类型的旧行一律按 operator 语义解释 */
+    public const INITIATOR_TYPE_DEFAULT = ExecutionIdentity::TYPE_OPERATOR;
+
     protected $table = 'approval_instances';
 
     protected $primaryKey = 'instance_id';
@@ -71,7 +84,7 @@ class ApprovalInstance extends Model
         'tenant_id', 'definition_id', 'definition_key', 'definition_version',
         'subject_type', 'subject_id', 'project_id', 'subject_snapshot',
         'definition_snapshot', 'status', 'current_step_no', 'is_exempt',
-        'exemption_reason', 'initiated_by', 'idempotency_key',
+        'exemption_reason', 'initiated_by', 'initiated_by_type', 'idempotency_key',
         'previous_instance_id', 'active_unique_key', 'outcome',
         'started_at', 'completed_at',
     ];
@@ -103,6 +116,26 @@ class ApprovalInstance extends Model
     public function isActive(): bool
     {
         return in_array($this->status, self::ACTIVE_STATUSES, true);
+    }
+
+    /**
+     * 发起人类型（C2O v0.4 §4.1）：存量行缺失类型列时按 operator 安全默认解释，
+     * 禁止猜成 User。
+     */
+    public function initiatedByType(): string
+    {
+        $type = $this->initiated_by_type;
+
+        return $type === null || $type === '' ? self::INITIATOR_TYPE_DEFAULT : (string) $type;
+    }
+
+    /**
+     * 发起人判定（类型 + ID 双匹配）：同数值 ID 不跨身份空间成立。
+     */
+    public function wasInitiatedBy(ExecutionIdentity $actor): bool
+    {
+        return $this->initiatedByType() === $actor->type
+            && (string) $this->initiated_by === (string) $actor->subjectId;
     }
 
     public function currentStep(): ?ApprovalStep

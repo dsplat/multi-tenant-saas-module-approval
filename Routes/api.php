@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Route;
 use MultiTenantSaas\Modules\Approval\Http\Controllers\ApprovalDefinitionController;
 use MultiTenantSaas\Modules\Approval\Http\Controllers\ApprovalInstanceController;
+use MultiTenantSaas\Modules\Approval\Http\Controllers\UserApprovalController;
 
 /*
 |--------------------------------------------------------------------------
@@ -72,4 +73,40 @@ Route::prefix(config('approval.route_prefix', ''))->middleware('operator.identif
         Route::post('{id}/decisions', [ApprovalInstanceController::class, 'decide'])
             ->middleware('capability:common.approval.decision.submit');
     });
+});
+
+/*
+|--------------------------------------------------------------------------
+| 审批中心 — C 端接口（User 面，C2O 缺口②）
+|--------------------------------------------------------------------------
+| 独立前缀 /user/approval/instances + 独立 `user.identify` 组（C2O 采用约定 v0.4
+| §4.2）：身份空间边界清晰，与 console 面（上方 approval/instances/...）不同命名
+| 空间，withdraw 不会同 method/URI 重复注册。
+|
+| 授权：user.identify 装载 User 执行身份后走统一能力门（common.approval.self_*，
+| 准入 member + 认证等级）；**不挂 rbac.permission** —— RBAC 只作用于 Operator，
+| User 不拥有角色（identity-model 铁律）。逐记录可见性（仅本人发起人）在控制器
+| 裁决；内部快照/决策意见独立授权不出 C 端（S0 §6.3 白名单见
+| Http/Resources/UserApprovalResource）。无通用建单入口：User 发起由具体领域经
+| ApprovalService::initiateAs 验证主体操作权后创建（通用建单权限不开）。
+*/
+Route::prefix('user/approval/instances')->middleware('user.identify')->group(function () {
+    // 静态 mine 必须排在 {instanceId} 动态路由之前：注册顺序即路由缓存序列化顺序；
+    // {instanceId} 另加 whereNumber 双保险——'mine' 在任何顺序下都不可能被吞成 ID。
+    Route::get('/mine', [UserApprovalController::class, 'mine'])
+        ->middleware('capability:common.approval.self_read');
+
+    Route::get('/{instanceId}/timeline', [UserApprovalController::class, 'timeline'])
+        ->middleware('capability:common.approval.self_read')
+        ->whereNumber('instanceId');
+
+    // 撤回（self-scoped）：发起人本人；URI 前缀独立，不与 console 面
+    // POST approval/instances/{id}/withdraw 重复注册。
+    Route::post('/{instanceId}/withdraw', [UserApprovalController::class, 'withdraw'])
+        ->middleware('capability:common.approval.self_withdraw')
+        ->whereNumber('instanceId');
+
+    Route::get('/{instanceId}', [UserApprovalController::class, 'show'])
+        ->middleware('capability:common.approval.self_read')
+        ->whereNumber('instanceId');
 });

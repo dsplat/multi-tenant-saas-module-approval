@@ -136,6 +136,25 @@ class ApprovalServiceProvider extends ModuleServiceProvider
         $requirements?->register('common.approval.create', ExecutionIdentity::TYPE_OPERATOR, ['permission' => 'approval.create']);
         $requirements?->register('common.approval.update', ExecutionIdentity::TYPE_OPERATOR, ['permission' => 'approval.manage']);
         $requirements?->register('common.approval.delete', ExecutionIdentity::TYPE_OPERATOR, ['permission' => 'approval.manage']);
+
+        // C 端 self-scoped 能力（C2O 缺口②：/user/approval/... 经 user.identify + capability 门）。
+        // User 无 RBAC 角色（identity-model 铁律），准入只看成员认证等级；逐记录可见性
+        // （仅本人发起人）由控制器裁决，能力门不承载记录级授权。self_withdraw 与
+        // self_read 成对（读=本人列表/详情/公开时间线，写=本人撤回）。无 self_create：
+        // User 无通用建单权限，发起由具体领域经 ApprovalService::initiateAs 证明主体
+        // 操作权后创建（C2O v0.4 §4.1）。
+        foreach (['common.approval.self_read', 'common.approval.self_withdraw'] as $key) {
+            $registry->register(new CapabilityDefinition(
+                key: $key,
+                subjectTypes: [ExecutionIdentity::TYPE_USER],
+                targetScope: CapabilityDefinition::TARGET_TENANT,
+                admissionPolicy: [ExecutionIdentity::TYPE_USER => ['member']],
+            ));
+
+            $requirements?->register($key, ExecutionIdentity::TYPE_USER, [
+                'min_level' => ExecutionIdentity::LEVEL_AUTHENTICATED,
+            ]);
+        }
     }
 
     private function registerCapability(
