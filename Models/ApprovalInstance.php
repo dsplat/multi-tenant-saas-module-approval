@@ -6,6 +6,7 @@ namespace MultiTenantSaas\Modules\Approval\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use InvalidArgumentException;
 use MultiTenantSaas\Concerns\BelongsToTenant;
 use MultiTenantSaas\Concerns\HasGlobalId;
 use MultiTenantSaas\Concerns\SerializesFriendlyDates;
@@ -118,15 +119,22 @@ class ApprovalInstance extends Model
         return in_array($this->status, self::ACTIVE_STATUSES, true);
     }
 
-    /**
-     * 发起人类型（C2O v0.4 §4.1）：存量行缺失类型列时按 operator 安全默认解释，
-     * 禁止猜成 User。
-     */
     public function initiatedByType(): string
     {
-        $type = $this->initiated_by_type;
+        $attributes = $this->getAttributes();
 
-        return $type === null || $type === '' ? self::INITIATOR_TYPE_DEFAULT : (string) $type;
+        // 只有旧 schema 缺列能证明 Operator 语义，空值与裁列缺失不能证明身份。
+        if (! array_key_exists('initiated_by_type', $attributes)
+            && ! $this->getConnection()->getSchemaBuilder()->hasColumn($this->getTable(), 'initiated_by_type')) {
+            return self::INITIATOR_TYPE_DEFAULT;
+        }
+
+        $type = $attributes['initiated_by_type'] ?? null;
+        if (! in_array($type, self::INITIATOR_TYPES, true)) {
+            throw new InvalidArgumentException('approval_initiator_type: 发起人类型必须为 user 或 operator');
+        }
+
+        return $type;
     }
 
     /**

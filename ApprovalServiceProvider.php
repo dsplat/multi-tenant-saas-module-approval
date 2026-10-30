@@ -12,6 +12,7 @@ use MultiTenantSaas\Contracts\CapabilityRequirementResolverContract;
 use MultiTenantSaas\Contracts\SceneRegistryContract;
 use MultiTenantSaas\Contracts\ToolRegistryContract;
 use MultiTenantSaas\Modules\Ai\Services\Agent\Dto\Tool;
+use MultiTenantSaas\Modules\Approval\Console\Commands\CheckApprovalInitiatorRepair;
 use MultiTenantSaas\Modules\Approval\Console\Commands\ExpireApprovalInstances;
 use MultiTenantSaas\Modules\Approval\Contracts\ApprovalServiceContract;
 use MultiTenantSaas\Modules\Approval\Services\ApprovalService;
@@ -76,6 +77,7 @@ class ApprovalServiceProvider extends ModuleServiceProvider
     {
         if ($this->app->runningInConsole()) {
             $this->commands([
+                CheckApprovalInitiatorRepair::class,
                 ExpireApprovalInstances::class,
             ]);
         }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MultiTenantSaas\Modules\Approval\Adapters;
 
+use Illuminate\Support\Facades\Schema;
 use InvalidArgumentException;
 use MultiTenantSaas\Modules\Approval\Models\ApprovalInstance;
 use MultiTenantSaas\Modules\Matter\Contracts\MatterAdapterContract;
@@ -21,8 +22,8 @@ use MultiTenantSaas\Modules\Matter\Dto\MatterProjection;
  *   - status_display   ← approval_instances.status 的展示映射
  *   - result_code      ← 终态 outcome（approved/rejected/withdrawn/cancelled/expired/exempt）
  *   - result_summary   ← 固定为空：审批意见与主体快照属领域私有，不投影
- *   - 参与关系          ← initiated_by 登记为 role=initiator 的 **operator**
- *                        （S0 §7.9：initiated_by_type 尚未增量迁移，现行语义为 Operator）
+ *   - 参与关系          ← (initiated_by_type, initiated_by) 登记为 role=initiator
+ *                        （仅旧 schema 无类型列时按 Operator 解释）
  *   - 当前责任          ← 进行中 = 待审批队列（kind=queue，不指向具体审批人）。
  *                        approvers_snapshot 是领域私有的审批人快照，**不复制**：它随时可能被
  *                        下一步覆盖，且复制后 C 端会误以为「某人是固定处理人」。
@@ -62,16 +63,29 @@ final class ApprovalMatterAdapter implements MatterAdapterContract
             return null; // instance_id 为数值主键
         }
 
-        $instance = ApprovalInstance::query()->find((int) $reference->id);
+        $hasInitiatorType = Schema::hasColumn('approval_instances', 'initiated_by_type');
+        $columns = ['instance_id', 'tenant_id', 'definition_key', 'status', 'outcome', 'initiated_by'];
 
-        if ($instance === null || (int) $instance->tenant_id !== $reference->tenantId) {
+        if ($hasInitiatorType) {
+            $columns[] = 'initiated_by_type';
+        }
+
+        $instance = ApprovalInstance::query()
+            ->select($columns)
+            ->where('tenant_id', $reference->tenantId)
+            ->whereKey((int) $reference->id)
+            ->first();
+
+        if ($instance === null) {
             return null;
         }
+
+        $initiatorType = $instance->initiatedByType();
 
         $participants = [
             new MatterParticipantSpec(
                 MatterParticipantSpec::ROLE_INITIATOR,
-                MatterParticipantSpec::ACTOR_OPERATOR,
+                $initiatorType,
                 (int) $instance->initiated_by,
             ),
         ];

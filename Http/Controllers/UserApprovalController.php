@@ -155,8 +155,8 @@ class UserApprovalController extends BaseController
      *   - null     ：其余（未参与过 / 保留期外）按不存在（404，不泄露存在性）。
      *
      * 实例全文视图维持现状「仅本人发起人」（身份空间 + ID 双匹配）；非本人有效参与人
-     * 不因此获得实例视图。参与判定走 matter_participants（granted_at/revoked_at）+
-     * 既有 own（initiated_by）逻辑，无参与记录的本人沿用现状全文视图。
+     * 不因此获得实例视图。已有 Matter 时必须有真实 User 活跃参与关系；
+     * 仅无 Matter 或投影表时，本人沿用现状全文视图。
      */
     private function visibilityTier(Request $request, ApprovalInstance $instance): ?string
     {
@@ -194,7 +194,7 @@ class UserApprovalController extends BaseController
             }
         }
 
-        if ($isSelf && ($hasActive || $states === [])) {
+        if ($isSelf && $hasActive) {
             return self::TIER_FULL;
         }
 

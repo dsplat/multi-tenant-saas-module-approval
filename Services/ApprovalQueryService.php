@@ -114,7 +114,8 @@ class ApprovalQueryService
         $events = [[
             'type' => 'instance_created',
             'at' => $this->formatTime($instance->created_at),
-            'operator_id' => $instance->initiated_by,
+            'actor_type' => $instance->initiatedByType(),
+            'actor_id' => $instance->initiated_by,
             'status' => $instance->status,
             'seq' => 0,
         ]];
@@ -302,6 +303,7 @@ class ApprovalQueryService
                 'is_exempt' => (bool) $instance->is_exempt,
                 'current_step_no' => $instance->current_step_no,
                 'initiated_by' => $instance->initiated_by,
+                'initiated_by_type' => $instance->initiatedByType(),
                 'started_at' => $this->formatTime($instance->started_at),
                 'completed_at' => $this->formatTime($instance->completed_at),
             ])
@@ -371,6 +373,7 @@ class ApprovalQueryService
             'is_exempt' => (bool) $instance->is_exempt,
             'exemption_reason' => $instance->is_exempt ? $instance->exemption_reason : null,
             'initiated_by' => $instance->initiated_by,
+            'initiated_by_type' => $instance->initiatedByType(),
             'started_at' => $this->formatTime($instance->started_at),
             'completed_at' => $this->formatTime($instance->completed_at),
             'steps' => $steps,
