@@ -2,11 +2,14 @@
 ===============
 
 模块标识：approval
-后台入口：Console → 审批中心（路由 `approval`）
+后台入口：Console → 审批中心（路由 `approval`，实例中心）；旧台账在 `approval-ledger`
 数据表：`approvals`
 
 ## 能力
 
+- 审批实例：全部实例 / 我的待办、状态与关键词筛选、统计卡；详情含步骤与时间线；
+  通过/驳回决策（`common.approval.decision.submit`），发起人撤回、管理员取消；
+  旧 `approvals` 台账保留在独立入口。
 - 列表查询：按状态与标题关键词筛选，分页返回
 - 新建 / 编辑：标题、slug、状态、内容、排序
 - 删除：软删除，可由 `deleted_at` 恢复
