@@ -29,7 +29,13 @@
       "provider": "MultiTenantSaas\\Modules\\Approval\\ApprovalServiceProvider",
       "tenant_toggleable": true,
       "module_loadable": true,
-      "default_tenant_enabled": true
+      "default_tenant_enabled": true,
+      "optional_dependencies": [
+        "workflow"
+      ]
     }
+  },
+  "suggest": {
+    "dsplat/multi-tenant-saas-module-workflow": "启用 Approval→Workflow 审批桥接；未安装时 approval 节点启动前拒绝"
   }
 }
