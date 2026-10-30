@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MultiTenantSaas\Modules\Approval;
 
+use Illuminate\Support\Facades\Event;
 use MultiTenantSaas\Access\ResourceRegistry;
 use MultiTenantSaas\Authorization\CapabilityDefinition;
 use MultiTenantSaas\Context\ExecutionIdentity;
@@ -15,7 +16,11 @@ use MultiTenantSaas\Modules\Ai\Services\Agent\Dto\Tool;
 use MultiTenantSaas\Modules\Approval\Console\Commands\CheckApprovalInitiatorRepair;
 use MultiTenantSaas\Modules\Approval\Console\Commands\ExpireApprovalInstances;
 use MultiTenantSaas\Modules\Approval\Contracts\ApprovalServiceContract;
+use MultiTenantSaas\Modules\Approval\Events\ApprovalInstanceApproved;
+use MultiTenantSaas\Modules\Approval\Events\ApprovalInstanceRejected;
 use MultiTenantSaas\Modules\Approval\Services\ApprovalService;
+use MultiTenantSaas\Modules\Approval\Services\Bridge\ApprovalWorkflowResumeBridge;
+use MultiTenantSaas\Modules\Approval\Services\Bridge\ApprovalWorkflowResumeHandler;
 use MultiTenantSaas\Modules\Approval\Services\Resolvers\FixedApproverResolver;
 use MultiTenantSaas\Modules\Approval\Services\Resolvers\RoleApproverResolver;
 use MultiTenantSaas\Modules\Approval\Services\Resolvers\SubjectOwnerApproverResolver;
@@ -25,6 +30,9 @@ use MultiTenantSaas\Modules\Approval\Services\Tools\ApprovalMyPendingHandler;
 use MultiTenantSaas\Modules\Approval\Support\ApprovalSubjectRegistry;
 use MultiTenantSaas\Modules\Approval\Support\ApproverResolverRegistry;
 use MultiTenantSaas\Modules\Contracts\ModuleServiceProvider;
+use MultiTenantSaas\Modules\Workflow\Contracts\WorkflowResumeHandlerContract;
+use MultiTenantSaas\Modules\Workflow\Contracts\WorkflowWaitHandlerRegistryContract;
+use MultiTenantSaas\Modules\Workflow\Services\WorkflowEngine;
 
 /**
  * 审批中心
@@ -85,11 +93,54 @@ class ApprovalServiceProvider extends ModuleServiceProvider
 
     protected function bootModule(): void
     {
+        $this->registerWorkflowResumeBridge();
         $this->registerApproverResolvers();
         $this->registerAuthorizationCapabilities();
         $this->registerResources();
         $this->registerTools();
         $this->registerScenes();
+    }
+
+    /**
+     * Approval → Workflow 等待/恢复桥接接线（P6B / G5）。
+     *
+     * 不在 composer.json 声明 Workflow 依赖：只有 Workflow 契约类真实存在、且容器里
+     * 已有 wait-handler registry 时才注册 handler 与事件监听。Workflow 未安装时
+     * Approval 完全独立工作，approval 节点仍会被 Workflow 以 approval_bridge_missing
+     * 在启动前拒绝（Workflow 侧默认空 registry）。
+     */
+    private function registerWorkflowResumeBridge(): void
+    {
+        if (! class_exists(WorkflowEngine::class)
+            || ! interface_exists(WorkflowResumeHandlerContract::class)
+            || ! interface_exists(WorkflowWaitHandlerRegistryContract::class)) {
+            return;
+        }
+
+        $registerBridge = function (): void {
+            if (! $this->app->bound(WorkflowWaitHandlerRegistryContract::class)) {
+                return;
+            }
+
+            $registry = $this->app->make(WorkflowWaitHandlerRegistryContract::class);
+
+            if (! $registry->has(ApprovalWorkflowResumeHandler::HANDLER_KEY)) {
+                $registry->register(
+                    ApprovalWorkflowResumeHandler::HANDLER_KEY,
+                    $this->app->make(ApprovalWorkflowResumeHandler::class),
+                );
+            }
+
+            Event::listen(ApprovalInstanceApproved::class, [ApprovalWorkflowResumeBridge::class, 'handleApproved']);
+            Event::listen(ApprovalInstanceRejected::class, [ApprovalWorkflowResumeBridge::class, 'handleRejected']);
+        };
+
+        if ($this->app->bound(WorkflowWaitHandlerRegistryContract::class)) {
+            $registerBridge();
+        } else {
+            // 模块启动顺序可能让 Workflow 的绑定晚于本模块 boot；容器 boot 完成后再试一次。
+            $this->app->booted($registerBridge);
+        }
     }
 
     /**
